@@ -1,0 +1,217 @@
+#!/bin/sh
+
+
+############################################################
+###################### DEFAULT CONFIG ######################
+############################################################
+
+#
+# [Expiration time after a snapshot creation]
+#
+# Snapshots which are created $AUTOSNAP_EXP_TIME days ago
+# will be removed after a new snapshot is created.
+#
+# You can override this default config by executing:
+# $ sudo AUTOSNAP_EXP_TIME=30 ./btrfs-autosnap /path/to/subvol
+#
+AUTOSNAP_EXP_TIME_DEFAULT=365
+
+#
+# [Minimum number of snapshots to preserve]
+#
+# Even if a snapshot is expired, it won't be removed
+# if the snapshot is in $AUTOSNAP_MIN_COUNT-th latest snapshot.
+# The priority of this config is higher than the expiration time config.
+#
+# You can override this default config by executing:
+# $ sudo AUTOSNAP_MIN_COUNT=10 ./btrfs-autosnap /path/to/subvol
+#
+AUTOSNAP_MIN_COUNT_DEFAULT=20
+
+#
+# [Examples of the script execute]
+#
+# Execute on '/path/to/subvol' and '/path/to/subvol_2' with default config
+# $ sudo ./btrfs-autosnap /path/to/subvol /path/to/subvol_2
+#
+# Execute on '/path/to/subvol'
+# with AUTOSNAP_EXP_TIME=60, and AUTOSNAP_MIN_COUNT=5
+# $ sudo AUTOSNAP_EXP_TIME=60 AUTOSNAP_MIN_COUNT=5 ./btrfs-autosnap /path/to/subvol
+#
+# Execute on './subvol', './subvol_2', './subvol_3'
+# with AUTOSNAP_EXP_TIME=(default), and AUTOSNAP_MIN_COUNT=30
+# $ sudo AUTOSNAP_MIN_COUNT=30 ./btrfs-autosnap ./subvol ./subvol2 ./subvol3
+#
+
+
+
+############################################################
+#################### MAIN SCRIPT ROUTINE ###################
+############################################################
+
+
+
+main() {
+  # Var initialize
+  BIN_NAME="$(/bin/basename "$1")"
+  shift
+  AUTOSNAP_EXP_TIME="${AUTOSNAP_EXP_TIME:-$AUTOSNAP_EXP_TIME_DEFAULT}"
+  AUTOSNAP_MIN_COUNT="${AUTOSNAP_MIN_COUNT:-$AUTOSNAP_MIN_COUNT_DEFAULT}"
+
+
+
+  # Help msg
+  if [ $# -eq 0 ]
+  then
+    echo "usage:	$BIN_NAME [subvol-1] [subvol-2] ..." 1>&2
+    echo "	AUTOSNAP_EXP_TIME=<#> AUTOSNAP_MIN_COUNT=<#> $BIN_NAME [subvol-1] [subvol-2] ..." 1>&2
+    exit 1
+  fi
+
+
+
+  # Root check
+  if [ "$(/bin/id -u)" -ne 0 ]
+  then
+    echo "$BIN_NAME: ERROR: Root privilieges needed" 1>&2
+    exit 1
+  fi
+
+
+
+  # Env var check (if non-negative number)
+  if ! [ "$AUTOSNAP_EXP_TIME" -ge 0 ] 2> /dev/null
+  then
+    echo "$BIN_NAME: ERROR: "\
+         "Invalid AUTOSNAP_EXP_TIME ($AUTOSNAP_EXP_TIME)" 1>&2
+    exit 2
+  fi
+
+  if ! [ "$AUTOSNAP_MIN_COUNT" -ge 0 ] 2> /dev/null
+  then
+    echo "$BIN_NAME: ERROR: "\
+         "Invalid AUTOSNAP_MIN_COUNT ($AUTOSNAP_MIN_COUNT)" 1>&2
+    exit 2
+  fi
+
+
+
+  # Autosnap for all subvolume arguments
+  for ARG in "$@"
+  do
+    # Only if path is subvolume (inode 256)
+    if [ "$(/bin/stat -c '%i' "$ARG")" -eq 256 ]
+    then
+      echo "Refreshing Snapshots for '$ARG'..."
+      btrfs_autosnap "$ARG"
+    else
+      echo "Invalid Subvolume Path '$ARG'!"
+    fi
+  done
+}
+
+
+
+############################################################
+######################### FUNCTIONS ########################
+############################################################
+
+
+
+# Create a new snapshot, and then remove old snapshots
+btrfs_autosnap() {
+  # Args
+  BASEDIR="$1"
+
+  # Body
+  # Initialize paths
+  PARENTDIR=$(/bin/dirname "$BASEDIR")
+  BASEDIR_NAME=$(/bin/basename "$BASEDIR")
+  SNAPDIR="$PARENTDIR"/.@snapshots_"$BASEDIR_NAME"
+  if [ ! -d "$SNAPDIR" ]
+  then
+    /sbin/btrfs subvolume create "$SNAPDIR"
+    [ -x /sbin/restorecon ] && /sbin/restorecon "$SNAPDIR"
+  fi
+
+  # Set info of snapshots
+  SNAP_NEW="$SNAPDIR"/@"$BASEDIR_NAME"_$(/bin/date +%Y.%m.%d-%H:%M:%S)
+  SNAP_NEW_GEN=$(get_subvol_gen "$BASEDIR")
+  SNAP_OLD_LATEST=$(get_snap_list "$SNAPDIR" "$BASEDIR_NAME" 1)
+  SNAP_OLD_LATEST_GEN=$(get_subvol_gen "$SNAP_OLD_LATEST")
+
+  # Generate a snapshot if needed
+  if [ "$SNAP_NEW_GEN" != "$SNAP_OLD_LATEST_GEN" ] && [ ! -d "$SNAP_NEW" ]
+  then
+    /bin/touch "$BASEDIR" \
+      && /sbin/btrfs subvolume snapshot -r "$BASEDIR" "$SNAP_NEW"
+  fi
+
+  # Delete expired snapshots if exist
+  SNAP_EXPIRED=$(get_snap_list "$SNAPDIR" "$BASEDIR_NAME" 0)
+  SNAP_TO_PRESERVE=$(get_snap_list "$SNAPDIR" "$BASEDIR_NAME" "$AUTOSNAP_MIN_COUNT")
+  SNAP_TO_DELETE=$( echo "$SNAP_EXPIRED" | \
+                            { echo "$SNAP_TO_PRESERVE" \
+                                | /bin/diff --new-line-format="" \
+                                            --unchanged-line-format="" \
+                                            /dev/fd/3 -; \
+                            } 3<&0 )
+  
+  if [ -n "$SNAP_TO_DELETE" ]
+  then
+    echo "$SNAP_TO_DELETE" | /bin/xargs /sbin/btrfs subvolume delete
+  fi
+}
+
+
+
+# Get the generation of subvolume
+get_subvol_gen() {
+  # Args
+  SUBVOL_PATH="$1"
+
+  # Body
+  if [ -d "$SUBVOL_PATH" ]
+  then
+    /sbin/btrfs subvolume show "$SUBVOL_PATH" \
+      | /bin/grep "Generation:" \
+      | /bin/tr -s '\t' \
+      | /bin/cut -d'	' -f3
+  else
+    echo "0"
+  fi
+}
+
+
+
+# Get the list of snapshots
+# (get $SNAP_COUNT latest snapshots if $SNAP_COUNT > 0,
+#  otherwise ($SNAP_COUNT == 0) get ones to be expired)
+get_snap_list() {
+  # Args
+  SNAPDIR="$1" BASEDIR_NAME="$2" SNAP_COUNT="$3" EXPIRATION_OPT=
+
+  # Body
+  if [ "$SNAP_COUNT" -eq 0 ]
+  then
+    [ "$AUTOSNAP_EXP_TIME" -gt 0 ] && EXPIRATION_OPT="-mtime +$AUTOSNAP_EXP_TIME"
+    SNAP_COUNT=1048576
+  fi
+  /bin/find "$SNAPDIR" -maxdepth 1 \
+            -regextype sed \
+            -regex "$SNAPDIR""/@""$BASEDIR_NAME""_[0-9]\{4\}\.[0-9]\{2\}\.[0-9]\{2\}-[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}" \
+            -inum 256 \
+            $EXPIRATION_OPT \
+    | /bin/sort -r | /bin/head -n"$SNAP_COUNT"
+}
+
+
+
+############################################################
+###################### FUNCTION EXEC #######################
+############################################################
+
+
+
+# execute main, with $0 and all arguments
+main "$0" "$@"
