@@ -37,7 +37,7 @@ inside the snapshot list dir with the following path:
 
 ## Examples
 
-### Run the script on bash
+### Run the script
 
 - Refresh snapshots of `./subvol` and `./subvol_2` with default config
   - `$ sudo ./btrfs-autosnap ./subvol ./subvol_2`
@@ -49,11 +49,10 @@ inside the snapshot list dir with the following path:
   - `$ sudo ./btrfs-autosnap -n30 ./subvol ./subvol2`
 
 
-### Run the script everyday with bash
+### Run the script everyday
 
 - /etc/cron.daily/btrfs-autosnap-daily
 ```
-#!/bin/bash
 /path/to/the/script/btrfs-autosnap <SUBVOL_PATH_1> <SUBVOL_PATH_2> ...
 ```
 
